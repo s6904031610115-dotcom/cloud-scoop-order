@@ -1,178 +1,150 @@
 'use client';
 
-import React, { use, useState, useEffect } from 'react';
-import { supabase } from '@/lib/supabaseClient';
+import { use, useState, useEffect } from 'react';
+import { supabase } from '../../../lib/supabaseClient';
 
 export default function OrderPage({ params }) {
-  const { tableNumber } = use(params);
-  const numericTableNumber = Number(tableNumber);
+  // Next.js 15+ App Router params เป็น Promise ใน Client Component
+  const resolvedParams = use(params);
+  const tableNum = Number(resolvedParams.tableNumber);
 
   const [session, setSession] = useState(null);
-  const [sessionLoading, setSessionLoading] = useState(true);
-  const [sessionError, setSessionError] = useState(false);
-
+  const [sessionChecked, setSessionChecked] = useState(false);
   const [categories, setCategories] = useState([]);
-  const [selectedCategoryId, setSelectedCategoryId] = useState(null);
   const [menuItems, setMenuItems] = useState([]);
-  const [loadingMenu, setLoadingMenu] = useState(true);
+  const [activeCategory, setActiveCategory] = useState(null);
 
-  // Cart format: { [itemId]: { id, name, price, quantity } }
+  // ตะกร้าสินค้า: { [itemId]: { item, quantity } }
   const [cart, setCart] = useState({});
-  const [isCartOpen, setIsCartOpen] = useState(false);
-  const [submittingOrder, setSubmittingOrder] = useState(false);
-  const [toastMsg, setToastMsg] = useState('');
+  const [showCart, setShowCart] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [orderSuccessMsg, setOrderSuccessMsg] = useState(false);
 
-  // My Orders
+  // สถานะสำหรับหน้าต่าง "ออเดอร์ของฉัน"
+  const [showMyOrders, setShowMyOrders] = useState(false);
   const [myOrders, setMyOrders] = useState([]);
-  const [isMyOrdersOpen, setIsMyOrdersOpen] = useState(false);
-  const [loadingOrders, setLoadingOrders] = useState(false);
+  const [loadingMyOrders, setLoadingMyOrders] = useState(false);
 
-  // Billing
-  const [isBillingOpen, setIsBillingOpen] = useState(false);
-  const [closingSession, setClosingSession] = useState(false);
-  const [isClosed, setIsClosed] = useState(false);
-  const [finalBillAmount, setFinalBillAmount] = useState(0);
+  // สถานะสำหรับหน้าต่าง "เรียกเก็บเงิน"
+  const [showBillModal, setShowBillModal] = useState(false);
+  const [billingSessionOrders, setBillingSessionOrders] = useState([]);
+  const [loadingBill, setLoadingBill] = useState(false);
+  const [closingBill, setClosingBill] = useState(false);
+  const [isBilled, setIsBilled] = useState(false);
+  const [finalGrandTotal, setFinalGrandTotal] = useState(0);
 
+  // 1. ตรวจสอบ Session และดึงข้อมูลเมนู
   useEffect(() => {
-    if (!numericTableNumber || isNaN(numericTableNumber)) {
-      setSessionError(true);
-      setSessionLoading(false);
+    if (isNaN(tableNum) || tableNum <= 0) {
+      setSessionChecked(true);
       return;
     }
 
-    const checkSession = async () => {
+    async function initData() {
       try {
-        const { data, error } = await supabase
+        // ค้นหา Session ที่เปิดอยู่ของโต๊ะนี้
+        const { data: sessData, error: sessError } = await supabase
           .from('sessions')
-          .select('id, table_number, status')
-          .eq('table_number', numericTableNumber)
+          .select('*')
+          .eq('table_number', tableNum)
           .eq('status', 'open')
           .maybeSingle();
 
-        if (error || !data) {
-          setSessionError(true);
-        } else {
-          setSession(data);
-          fetchMenuData();
-          fetchMyOrders(data.id);
+        if (sessError) throw sessError;
+
+        if (!sessData) {
+          setSession(null);
+          setSessionChecked(true);
+          return;
+        }
+
+        setSession(sessData);
+
+        // ดึงหมวดหมู่และรายการเมนูที่พร้อมขาย
+        const [catRes, itemRes] = await Promise.all([
+          supabase.from('menu_categories').select('*').order('sort_order', { ascending: true }),
+          supabase.from('menu_items').select('*').eq('is_available', true),
+        ]);
+
+        if (catRes.error) throw catRes.error;
+        if (itemRes.error) throw itemRes.error;
+
+        const cats = catRes.data || [];
+        setCategories(cats);
+        setMenuItems(itemRes.data || []);
+        if (cats.length > 0) {
+          setActiveCategory(cats[0].id);
         }
       } catch (err) {
-        console.error('Session check error:', err);
-        setSessionError(true);
+        console.error('Error initializing order page:', err);
       } finally {
-        setSessionLoading(false);
+        setSessionChecked(true);
       }
-    };
-
-    checkSession();
-  }, [numericTableNumber]);
-
-  const fetchMenuData = async () => {
-    setLoadingMenu(true);
-    try {
-      const { data: catData, error: catError } = await supabase
-        .from('menu_categories')
-        .select('*')
-        .order('sort_order', { ascending: true });
-
-      if (catError) throw catError;
-      setCategories(catData || []);
-      if (catData && catData.length > 0) {
-        setSelectedCategoryId(catData[0].id);
-      }
-
-      const { data: itemData, error: itemError } = await supabase
-        .from('menu_items')
-        .select('*')
-        .eq('is_available', true);
-
-      if (itemError) throw itemError;
-      setMenuItems(itemData || []);
-    } catch (err) {
-      console.error('Error loading menu:', err);
-    } finally {
-      setLoadingMenu(false);
     }
-  };
 
-  const fetchMyOrders = async (sessionId) => {
-    if (!sessionId) return;
-    setLoadingOrders(true);
-    try {
-      const { data, error } = await supabase
-        .from('orders')
-        .select('*')
-        .eq('session_id', sessionId)
-        .order('created_at', { ascending: false });
+    initData();
+  }, [tableNum]);
 
-      if (error) throw error;
-      setMyOrders(data || []);
-    } catch (err) {
-      console.error('Error fetching orders:', err);
-    } finally {
-      setLoadingOrders(false);
-    }
-  };
-
-  const handleAddToCart = (item) => {
+  // จัดการปรับจำนวนสินค้าในตะกร้า
+  const updateCartQuantity = (item, delta) => {
     setCart((prev) => {
       const currentQty = prev[item.id]?.quantity || 0;
-      if (currentQty >= 5) return prev; // Limit 5 per item
+      const newQty = currentQty + delta;
+
+      if (newQty <= 0) {
+        const next = { ...prev };
+        delete next[item.id];
+        return next;
+      }
+
+      if (newQty > 5) return prev; // จำกัดสูงสุด 5 ชิ้นต่อรายการ
+
       return {
         ...prev,
         [item.id]: {
-          id: item.id,
-          name: item.name,
-          price: Number(item.price),
-          quantity: currentQty + 1,
+          item,
+          quantity: newQty,
         },
       };
     });
   };
 
-  const handleRemoveFromCart = (itemId) => {
-    setCart((prev) => {
-      const currentQty = prev[itemId]?.quantity || 0;
-      if (currentQty <= 1) {
-        const newCart = { ...prev };
-        delete newCart[itemId];
-        return newCart;
-      }
-      return {
-        ...prev,
-        [itemId]: {
-          ...prev[itemId],
-          quantity: currentQty - 1,
-        },
-      };
-    });
-  };
+  const clearCart = () => setCart({});
 
-  const cartItemsList = Object.values(cart);
-  const totalCartCount = cartItemsList.reduce((sum, item) => sum + item.quantity, 0);
-  const totalCartPrice = cartItemsList.reduce((sum, item) => sum + item.price * item.quantity, 0);
+  // สรุปข้อมูลในตะกร้า
+  const cartItemList = Object.values(cart);
+  const totalCartItemsCount = cartItemList.reduce((sum, entry) => sum + entry.quantity, 0);
+  const totalCartPrice = cartItemList.reduce(
+    (sum, entry) => sum + entry.quantity * entry.item.price,
+    0
+  );
 
+  // ส่งออเดอร์
   const handleSubmitOrder = async () => {
-    if (cartItemsList.length === 0 || !session) return;
-    if (totalCartCount > 10) {
-      alert('สั่งได้สูงสุดไม่เกิน 10 รายการต่อครั้ง');
+    if (!session || cartItemList.length === 0 || submitting) return;
+
+    if (cartItemList.length > 10) {
+      alert('สามารถสั่งได้สูงสุด 10 รายการต่อครั้ง');
       return;
     }
 
-    setSubmittingOrder(true);
+    setSubmitting(true);
+
     try {
-      const formattedItems = cartItemsList.map((item) => ({
-        name: item.name,
-        quantity: item.quantity,
-        price: item.price,
+      // ฟอร์แมตรายการสินค้าให้ตรงตามโครงสร้าง { name, quantity, price }
+      const formattedItems = cartItemList.map((entry) => ({
+        name: entry.item.name,
+        quantity: entry.quantity,
+        price: Number(entry.item.price),
       }));
 
+      // บันทึกแถวลงตาราง orders พร้อม session_id และดึง id ของออเดอร์ใหม่ด้วย .select('id').single()
       const { data: newOrder, error } = await supabase
         .from('orders')
         .insert([
           {
             session_id: session.id,
-            table_number: numericTableNumber,
+            table_number: tableNum,
             items: formattedItems,
             status: 'received',
           },
@@ -182,39 +154,100 @@ export default function OrderPage({ params }) {
 
       if (error) throw error;
 
-      // Order created successfully with stored newOrder.id
-      console.log('Created order ID:', newOrder?.id);
+      // เรียก API แจ้งเตือน Telegram แบบไม่ await และดักจับ error ด้วย .catch()
+      if (newOrder && newOrder.id) {
+        fetch('/api/notify-order', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: 'order',
+            orderId: newOrder.id,
+          }),
+        }).catch((err) => {
+          console.error('Failed to send Telegram order notification:', err);
+        });
+      }
 
-      setCart({});
-      setIsCartOpen(false);
-      setToastMsg('✨ ส่งออเดอร์เรียบร้อยแล้ว!');
-      setTimeout(() => setToastMsg(''), 3000);
-
-      // Refresh orders list
-      fetchMyOrders(session.id);
+      // แสดงผลสำเร็จและล้างตะกร้า
+      clearCart();
+      setShowCart(false);
+      setOrderSuccessMsg(true);
+      setTimeout(() => setOrderSuccessMsg(false), 3000);
     } catch (err) {
       console.error('Error submitting order:', err);
       alert('เกิดข้อผิดพลาดในการส่งออเดอร์ กรุณาลองใหม่อีกครั้ง');
     } finally {
-      setSubmittingOrder(false);
+      setSubmitting(false);
     }
   };
 
-  const calculateGrandTotal = () => {
-    return myOrders.reduce((sum, order) => {
-      const orderItems = Array.isArray(order.items) ? order.items : [];
-      const orderTotal = orderItems.reduce((iSum, item) => iSum + (Number(item.price) * Number(item.quantity)), 0);
-      return sum + orderTotal;
-    }, 0);
-  };
-
-  const handleConfirmCheckout = async () => {
+  // ดึงรายการ "ออเดอร์ของฉัน"
+  const handleOpenMyOrders = async () => {
     if (!session) return;
-    setClosingSession(true);
+    setShowMyOrders(true);
+    setLoadingMyOrders(true);
 
     try {
-      const grandTotal = calculateGrandTotal();
+      const { data, error } = await supabase
+        .from('orders')
+        .select('*')
+        .eq('session_id', session.id)
+        .order('created_at', { ascending: false });
 
+      if (error) throw error;
+      setMyOrders(data || []);
+    } catch (err) {
+      console.error('Error fetching my orders:', err);
+    } finally {
+      setLoadingMyOrders(false);
+    }
+  };
+
+  // เปิดหน้าต่าง "เรียกเก็บเงิน"
+  const handleOpenBillModal = async () => {
+    if (!session) return;
+    setShowBillModal(true);
+    setLoadingBill(true);
+
+    try {
+      const { data, error } = await supabase
+        .from('orders')
+        .select('*')
+        .eq('session_id', session.id);
+
+      if (error) throw error;
+      setBillingSessionOrders(data || []);
+    } catch (err) {
+      console.error('Error fetching bill details:', err);
+    } finally {
+      setLoadingBill(false);
+    }
+  };
+
+  // คำนวณยอดรวมสำหรับเช็คบิล
+  const calculateGrandTotal = (orders) => {
+    let total = 0;
+    if (orders && Array.isArray(orders)) {
+      for (const ord of orders) {
+        if (Array.isArray(ord.items)) {
+          for (const item of ord.items) {
+            total += (Number(item.price) || 0) * (Number(item.quantity) || 0);
+          }
+        }
+      }
+    }
+    return total;
+  };
+
+  // ยืนยันปิด Session / เช็คบิล
+  const handleConfirmBill = async () => {
+    if (!session || closingBill) return;
+    setClosingBill(true);
+
+    const grandTotal = calculateGrandTotal(billingSessionOrders);
+
+    try {
+      // อัปเดตสถานะ session เป็น 'closed'
       const { error } = await supabase
         .from('sessions')
         .update({ status: 'closed' })
@@ -223,228 +256,240 @@ export default function OrderPage({ params }) {
 
       if (error) throw error;
 
-      setFinalBillAmount(grandTotal);
-      setIsClosed(true);
-      setIsBillingOpen(false);
+      // เรียก API แจ้งเตือน Telegram แบบไม่ await และดักจับ error ด้วย .catch()
+      fetch('/api/notify-order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: 'bill',
+          sessionId: session.id,
+        }),
+      }).catch((err) => {
+        console.error('Failed to send Telegram bill notification:', err);
+      });
+
+      setFinalGrandTotal(grandTotal);
+      setIsBilled(true);
+      setShowBillModal(false);
     } catch (err) {
-      console.error('Error during checkout:', err);
+      console.error('Error closing session for bill:', err);
       alert('เกิดข้อผิดพลาดในการเรียกเก็บเงิน กรุณาลองใหม่อีกครั้ง');
-    } finally {
-      setClosingSession(false);
+      setClosingBill(false);
     }
   };
 
-  const getStatusLabel = (status) => {
+  // ตัวแปลงแถบสถานะ
+  const renderStatusBadge = (status) => {
     switch (status) {
       case 'received':
-        return { text: 'รับออเดอร์แล้ว', bg: '#CFECF3', color: '#4A2E1B' };
+        return <span style={styles.badgeReceived}>รับออเดอร์แล้ว</span>;
       case 'preparing':
-        return { text: 'กำลังทำ', bg: '#F6FFDC', color: '#4A2E1B' };
+        return <span style={styles.badgePreparing}>กำลังทำ</span>;
       case 'served':
-        return { text: 'เสิร์ฟแล้ว', bg: '#DAF9DE', color: '#27AE60' };
+        return <span style={styles.badgeServed}>เสิร์ฟแล้ว</span>;
       default:
-        return { text: status, bg: '#E2E8F0', color: '#4A2E1B' };
+        return <span style={styles.badgeDefault}>{status}</span>;
     }
   };
 
-  if (isClosed) {
+  // ----------------------------------------------------
+  // Render
+  // ----------------------------------------------------
+
+  // กรณีกำลังตรวจสอบ Session
+  if (!sessionChecked) {
     return (
-      <div style={styles.fullScreenContainer}>
-        <div style={styles.fullScreenCard}>
-          <span style={{ fontSize: '64px' }}>🍦</span>
-          <h1 style={{ ...styles.title, fontSize: '28px', color: '#4A2E1B' }}>ขอบคุณที่ใช้บริการ</h1>
-          <p style={{ color: '#7A5C45', margin: '8px 0 24px 0' }}>ร้านไอติมเมฆน้อย ยินดีต้อนรับเสมอค่ะ</p>
-          <div style={styles.billBox}>
-            <span style={{ fontSize: '15px', color: '#7A5C45' }}>ยอดที่ต้องชำระทั้งหมด (โต๊ะ {numericTableNumber})</span>
-            <span style={styles.billPriceText}>{finalBillAmount.toLocaleString()} บาท</span>
+      <div style={styles.centerContainer}>
+        <p style={styles.loadingText}>🍨 กำลังโหลดข้อมูลร้าน...</p>
+      </div>
+    );
+  }
+
+  // กรณีปิดโต๊ะเรียบร้อยแล้ว (เช็คบิลสำเร็จ)
+  if (isBilled) {
+    return (
+      <div style={styles.centerContainer}>
+        <div style={styles.thankYouCard}>
+          <div style={styles.thankYouIcon}>🎉🍦</div>
+          <h1 style={styles.thankYouTitle}>ขอบคุณที่ใช้บริการ</h1>
+          <p style={styles.thankYouSub}>ร้านไอติมเมฆน้อยยินดีให้บริการครับ</p>
+          <div style={styles.finalBillBox}>
+            <span>ยอดที่ต้องชำระทั้งสิ้น</span>
+            <strong style={styles.finalTotalText}>
+              {finalGrandTotal.toLocaleString('th-TH')} บาท
+            </strong>
           </div>
-          <p style={{ fontSize: '13px', color: '#A020F0', marginTop: '16px' }}>
-            กรุณาติดต่อชำระเงินที่เคาน์เตอร์หน้าร้าน
+          <p style={styles.closedNotice}>
+            * โต๊ะนี้ถูกปิดระบบสั่งอาหารแล้ว กรุณาชำระเงินที่เคาน์เตอร์
           </p>
         </div>
       </div>
     );
   }
 
-  if (sessionLoading) {
+  // กรณีโต๊ะยังไม่เปิดใช้งาน
+  if (!session) {
     return (
-      <div style={styles.fullScreenContainer}>
-        <div style={{ textAlign: 'center' }}>
-          <span style={{ fontSize: '48px' }}>☁️</span>
-          <p style={{ marginTop: '12px', color: '#4A2E1B', fontWeight: 'bold' }}>กำลังโหลดข้อมูลโต๊ะ...</p>
+      <div style={styles.centerContainer}>
+        <div style={styles.closedCard}>
+          <div style={styles.closedIcon}>☁️🚫</div>
+          <h1 style={styles.closedTitle}>โต๊ะนี้ยังไม่เปิดใช้งาน</h1>
+          <p style={styles.closedSub}>กรุณาแจ้งพนักงานหน้าร้านเพื่อทำการเปิดโต๊ะก่อนสั่งไอศกรีม</p>
         </div>
       </div>
     );
   }
 
-  if (sessionError || !session) {
-    return (
-      <div style={styles.fullScreenContainer}>
-        <div style={{ ...styles.fullScreenCard, border: '2px solid #F9B2D7' }}>
-          <span style={{ fontSize: '60px' }}>⚠️</span>
-          <h2 style={{ fontSize: '22px', fontWeight: '800', color: '#4A2E1B', margin: '16px 0 8px 0' }}>
-            โต๊ะนี้ยังไม่เปิดใช้งาน
-          </h2>
-          <p style={{ fontSize: '16px', color: '#7A5C45', margin: 0 }}>
-            กรุณาแจ้งพนักงานเพื่อเปิดโต๊ะ {numericTableNumber || ''} ก่อนสั่งอาหาร
-          </p>
-        </div>
-      </div>
-    );
-  }
-
-  const activeMenuItems = menuItems.filter((item) => item.category_id === selectedCategoryId);
+  const activeItems = menuItems.filter((i) => i.category_id === activeCategory);
 
   return (
     <div style={styles.container}>
-      {/* Toast Notification */}
-      {toastMsg && <div style={styles.toast}>{toastMsg}</div>}
-
-      {/* Header Bar */}
+      {/* Navigation Top Bar */}
       <header style={styles.header}>
         <div>
-          <span style={styles.tableBadge}>☁️ โต๊ะ {session.table_number}</span>
-          <h1 style={styles.headerTitle}>ไอติมเมฆน้อย</h1>
+          <span style={styles.brandTitle}>☁️ ไอติมเมฆน้อย</span>
+          <h1 style={styles.tableBadge}>โต๊ะ {tableNum}</h1>
         </div>
-
-        <div style={{ display: 'flex', gap: '8px' }}>
-          <button
-            onClick={() => {
-              fetchMyOrders(session.id);
-              setIsMyOrdersOpen(true);
-            }}
-            style={styles.myOrdersBtn}
-          >
+        <div style={styles.headerBtns}>
+          <button onClick={handleOpenMyOrders} style={styles.myOrdersBtn}>
             📋 ออเดอร์ของฉัน
           </button>
-          <button
-            onClick={() => {
-              fetchMyOrders(session.id);
-              setIsBillingOpen(true);
-            }}
-            style={styles.billBtn}
-          >
-            💰 เรียกเก็บเงิน
+          <button onClick={handleOpenBillModal} style={styles.billBtn}>
+            🧾 เรียกเก็บเงิน
           </button>
         </div>
       </header>
 
+      {/* แถบแจ้งเตือนส่งออเดอร์สำเร็จ */}
+      {orderSuccessMsg && (
+        <div style={styles.successBanner}>
+          ✅ ส่งออเดอร์แล้ว! พนักงานกำลังเตรียมไอศกรีมให้คุณ
+        </div>
+      )}
+
       {/* Category Tabs */}
-      {}
-      <div style={styles.tabContainer}>
+      <nav style={styles.categoryNav}>
         {categories.map((cat) => {
-          const isActive = cat.id === selectedCategoryId;
+          const isActive = cat.id === activeCategory;
           return (
             <button
               key={cat.id}
-              onClick={() => setSelectedCategoryId(cat.id)}
+              onClick={() => setActiveCategory(cat.id)}
               style={{
-                ...styles.tabButton,
-                backgroundColor: isActive ? '#F9B2D7' : '#FFFFFF',
-                color: '#4A2E1B',
-                border: isActive ? '2px solid #F9B2D7' : '1px solid #E2D7CE',
-                fontWeight: isActive ? '800' : '600',
+                ...styles.categoryTab,
+                ...(isActive ? styles.categoryTabActive : {}),
               }}
             >
               {cat.name}
             </button>
           );
         })}
-      </div>
+      </nav>
 
-      {/* Menu List */}
-      {}
-      <main style={styles.menuGrid}>
-        {loadingMenu ? (
-          <p style={{ textAlign: 'center', gridColumn: '1/-1', color: '#7A5C45', padding: '40px 0' }}>
-            กำลังโหลดรายการเมนู...
-          </p>
-        ) : activeMenuItems.length === 0 ? (
-          <p style={{ textAlign: 'center', gridColumn: '1/-1', color: '#7A5C45', padding: '40px 0' }}>
-            ไม่มีรายการเมนูในหมวดนี้
-          </p>
+      {/* Menu Grid */}
+      <main style={styles.menuContainer}>
+        {activeItems.length === 0 ? (
+          <p style={styles.emptyText}>ไม่มีรายการในหมวดหมู่นี้</p>
         ) : (
-          activeMenuItems.map((item) => {
-            const qty = cart[item.id]?.quantity || 0;
-            return (
-              <div key={item.id} style={styles.menuCard}>
-                <div style={{ flex: 1 }}>
-                  <h3 style={styles.itemName}>{item.name}</h3>
-                  <p style={styles.itemPrice}>{Number(item.price).toLocaleString()} บาท</p>
-                </div>
+          <div style={styles.menuGrid}>
+            {activeItems.map((item) => {
+              const qtyInCart = cart[item.id]?.quantity || 0;
+              return (
+                <div key={item.id} style={styles.menuCard}>
+                  <div style={styles.menuInfo}>
+                    <h3 style={styles.menuName}>{item.name}</h3>
+                    <p style={styles.menuPrice}>{item.price} บาท</p>
+                  </div>
 
-                <div style={styles.qtyControls}>
-                  {qty > 0 && (
-                    <>
-                      <button onClick={() => handleRemoveFromCart(item.id)} style={styles.qtyBtn}>
-                        -
+                  <div style={styles.quantityControls}>
+                    {qtyInCart > 0 ? (
+                      <>
+                        <button
+                          onClick={() => updateCartQuantity(item, -1)}
+                          style={styles.qtyBtnMinus}
+                        >
+                          -
+                        </button>
+                        <span style={styles.qtyText}>{qtyInCart}</span>
+                        <button
+                          onClick={() => updateCartQuantity(item, 1)}
+                          disabled={qtyInCart >= 5}
+                          style={{
+                            ...styles.qtyBtnPlus,
+                            opacity: qtyInCart >= 5 ? 0.4 : 1,
+                          }}
+                        >
+                          +
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        onClick={() => updateCartQuantity(item, 1)}
+                        style={styles.addCartBtn}
+                      >
+                        + เพิ่ม
                       </button>
-                      <span style={styles.qtyText}>{qty}</span>
-                    </>
-                  )}
-                  <button
-                    onClick={() => handleAddToCart(item)}
-                    disabled={qty >= 5}
-                    style={{
-                      ...styles.qtyBtn,
-                      backgroundColor: qty >= 5 ? '#E2E8F0' : '#DAF9DE',
-                    }}
-                  >
-                    +
-                  </button>
+                    )}
+                  </div>
                 </div>
-              </div>
-            );
-          })
+              );
+            })}
+          </div>
         )}
       </main>
 
-      {/* Floating Cart Button */}
-      {}
-      {totalCartCount > 0 && (
+      {/* ตะกร้าลอยด้านล่าง */}
+      {totalCartItemsCount > 0 && (
         <div style={styles.floatingCartBar}>
-          <div style={styles.cartBarContent} onClick={() => setIsCartOpen(true)}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <span style={styles.cartBadge}>{totalCartCount}</span>
-              <span style={{ fontWeight: '700', fontSize: '15px' }}>ดูตะกร้าสินค้า</span>
+          <div style={styles.cartBarInfo}>
+            <span style={styles.cartBadge}>{totalCartItemsCount}</span>
+            <div>
+              <p style={styles.cartTotalLabel}>รวมทั้งสิ้น</p>
+              <strong style={styles.cartTotalPrice}>
+                {totalCartPrice.toLocaleString('th-TH')} บาท
+              </strong>
             </div>
-            <span style={{ fontWeight: '800', fontSize: '16px' }}>
-              {totalCartPrice.toLocaleString()} บาท ❯
-            </span>
           </div>
+          <button onClick={() => setShowCart(true)} style={styles.viewCartBtn}>
+            🛒 ดูตะกร้า ({totalCartItemsCount})
+          </button>
         </div>
       )}
 
-      {/* Cart Drawer / Modal */}
-      {}
-      {isCartOpen && (
+      {/* Cart Modal */}
+      {showCart && (
         <div style={styles.modalOverlay}>
           <div style={styles.modalCard}>
             <div style={styles.modalHeader}>
-              <h3 style={styles.modalTitle}>🛒 รายการในตะกร้า</h3>
-              <button onClick={() => setIsCartOpen(false)} style={styles.closeIconBtn}>
+              <h3 style={styles.modalTitle}>🛒 ตะกร้าสินค้า</h3>
+              <button onClick={() => setShowCart(false)} style={styles.closeBtn}>
                 ✕
               </button>
             </div>
 
-            <div style={{ maxHeight: '300px', overflowY: 'auto', marginBottom: '16px' }}>
-              {cartItemsList.map((item) => (
+            <div style={styles.cartList}>
+              {cartItemList.map(({ item, quantity }) => (
                 <div key={item.id} style={styles.cartItemRow}>
                   <div>
-                    <div style={{ fontWeight: '700', color: '#4A2E1B' }}>{item.name}</div>
-                    <div style={{ fontSize: '13px', color: '#7A5C45' }}>{item.price} บาท/ชิ้น</div>
+                    <h4 style={styles.cartItemName}>{item.name}</h4>
+                    <span style={styles.cartItemSubPrice}>
+                      {item.price} × {quantity} = {item.price * quantity} บาท
+                    </span>
                   </div>
-                  <div style={styles.qtyControls}>
-                    <button onClick={() => handleRemoveFromCart(item.id)} style={styles.qtyBtn}>
+                  <div style={styles.quantityControls}>
+                    <button
+                      onClick={() => updateCartQuantity(item, -1)}
+                      style={styles.qtyBtnMinus}
+                    >
                       -
                     </button>
-                    <span style={styles.qtyText}>{item.quantity}</span>
+                    <span style={styles.qtyText}>{quantity}</span>
                     <button
-                      onClick={() => handleAddToCart(item)}
-                      disabled={item.quantity >= 5}
+                      onClick={() => updateCartQuantity(item, 1)}
+                      disabled={quantity >= 5}
                       style={{
-                        ...styles.qtyBtn,
-                        backgroundColor: item.quantity >= 5 ? '#E2E8F0' : '#DAF9DE',
+                        ...styles.qtyBtnPlus,
+                        opacity: quantity >= 5 ? 0.4 : 1,
                       }}
                     >
                       +
@@ -454,160 +499,135 @@ export default function OrderPage({ params }) {
               ))}
             </div>
 
-            <div style={styles.summaryBox}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
-                <span>จำนวนรวม</span>
-                <span>{totalCartCount} รายการ (สูงสุด 10)</span>
+            <div style={styles.cartFooter}>
+              <div style={styles.cartFooterTotal}>
+                <span>ยอดรวม</span>
+                <strong>{totalCartPrice.toLocaleString('th-TH')} บาท</strong>
               </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: '800', fontSize: '18px' }}>
-                <span>ราคารวม</span>
-                <span>{totalCartPrice.toLocaleString()} บาท</span>
-              </div>
+              <button
+                onClick={handleSubmitOrder}
+                disabled={submitting}
+                style={{
+                  ...styles.submitOrderBtn,
+                  opacity: submitting ? 0.6 : 1,
+                }}
+              >
+                {submitting ? 'กำลังส่งออเดอร์...' : '🚀 ส่งออเดอร์'}
+              </button>
             </div>
-
-            <button
-              onClick={handleSubmitOrder}
-              disabled={submittingOrder || totalCartCount === 0 || totalCartCount > 10}
-              style={{
-                ...styles.submitOrderBtn,
-                opacity: submittingOrder || totalCartCount > 10 ? 0.6 : 1,
-              }}
-            >
-              {submittingOrder ? 'กำลังส่งออเดอร์...' : '✨ ยืนยันส่งออเดอร์'}
-            </button>
           </div>
         </div>
       )}
 
       {/* My Orders Modal */}
-      {}
-      {isMyOrdersOpen && (
+      {showMyOrders && (
         <div style={styles.modalOverlay}>
           <div style={styles.modalCard}>
             <div style={styles.modalHeader}>
-              <h3 style={styles.modalTitle}>📋 ออเดอร์ของฉัน (โต๊ะ {session.table_number})</h3>
-              <button onClick={() => setIsMyOrdersOpen(false)} style={styles.closeIconBtn}>
+              <h3 style={styles.modalTitle}>📋 รายการที่สั่งไปแล้ว</h3>
+              <button onClick={() => setShowMyOrders(false)} style={styles.closeBtn}>
                 ✕
               </button>
             </div>
 
-            <div style={{ maxHeight: '350px', overflowY: 'auto', marginBottom: '16px' }}>
-              {loadingOrders ? (
-                <p style={{ textAlign: 'center', color: '#7A5C45' }}>กำลังโหลดออเดอร์...</p>
+            <div style={styles.modalBody}>
+              {loadingMyOrders ? (
+                <p style={styles.loadingText}>กำลังดึงรายการสั่ง...</p>
               ) : myOrders.length === 0 ? (
-                <p style={{ textAlign: 'center', color: '#7A5C45', padding: '20px 0' }}>ยังไม่มีรายการสั่งซื้อ</p>
+                <p style={styles.emptyText}>ยังไม่มีรายการที่สั่งในรอบนี้</p>
               ) : (
-                myOrders.map((ord, idx) => {
-                  const statusInfo = getStatusLabel(ord.status);
-                  const items = Array.isArray(ord.items) ? ord.items : [];
-                  const orderTotal = items.reduce(
-                    (s, i) => s + Number(i.price) * Number(i.quantity),
-                    0
-                  );
-
-                  return (
-                    <div key={ord.id || idx} style={styles.myOrderCard}>
-                      <div style={styles.myOrderHeader}>
-                        <span style={{ fontSize: '13px', fontWeight: '700', color: '#7A5C45' }}>
-                          ออเดอร์ #{myOrders.length - idx}
-                        </span>
-                        <span
-                          style={{
-                            ...styles.statusBadge,
-                            backgroundColor: statusInfo.bg,
-                            color: statusInfo.color,
-                          }}
-                        >
-                          {statusInfo.text}
-                        </span>
-                      </div>
-
-                      <div style={{ marginTop: '8px' }}>
-                        {items.map((it, i) => (
-                          <div key={i} style={styles.orderDetailRow}>
+                myOrders.map((ord, idx) => (
+                  <div key={ord.id} style={styles.myOrderCard}>
+                    <div style={styles.myOrderHeader}>
+                      <span>ออเดอร์ #{myOrders.length - idx}</span>
+                      {renderStatusBadge(ord.status)}
+                    </div>
+                    <div style={styles.myOrderItemList}>
+                      {Array.isArray(ord.items) &&
+                        ord.items.map((it, i) => (
+                          <div key={i} style={styles.myOrderItemRow}>
                             <span>
-                              {it.name} x {it.quantity}
+                              {it.name} x{it.quantity}
                             </span>
-                            <span>{(Number(it.price) * Number(it.quantity)).toLocaleString()} บาท</span>
+                            <span>{it.price * it.quantity} บาท</span>
                           </div>
                         ))}
-                      </div>
-
-                      <div style={styles.orderFooter}>
-                        <span>ยอดรวมออเดอร์นี้</span>
-                        <span style={{ fontWeight: '800' }}>{orderTotal.toLocaleString()} บาท</span>
-                      </div>
                     </div>
-                  );
-                })
+                  </div>
+                ))
               )}
             </div>
           </div>
         </div>
       )}
 
-      {/* Billing Modal */}
-      {}
-      {isBillingOpen && (
+      {/* Call Bill Modal */}
+      {showBillModal && (
         <div style={styles.modalOverlay}>
           <div style={styles.modalCard}>
             <div style={styles.modalHeader}>
-              <h3 style={styles.modalTitle}>💰 ยืนยันเรียกเก็บเงิน</h3>
-              <button onClick={() => setIsBillingOpen(false)} style={styles.closeIconBtn}>
+              <h3 style={styles.modalTitle}>🧾 ยืนยันเรียกเก็บเงิน</h3>
+              <button onClick={() => setShowBillModal(false)} style={styles.closeBtn}>
                 ✕
               </button>
             </div>
 
-            <div style={{ maxHeight: '300px', overflowY: 'auto', marginBottom: '16px' }}>
-              <p style={{ fontSize: '14px', fontWeight: '700', color: '#4A2E1B', marginBottom: '12px' }}>
-                รายการอาหารทั้งหมดที่สั่ง (โต๊ะ {session.table_number})
-              </p>
-
-              {myOrders.length === 0 ? (
-                <p style={{ textAlign: 'center', color: '#7A5C45', padding: '20px 0' }}>
-                  ยังไม่มีรายการสั่งอาหารในโต๊ะนี้
-                </p>
+            <div style={styles.modalBody}>
+              {loadingBill ? (
+                <p style={styles.loadingText}>กำลังคำนวณยอดเงิน...</p>
               ) : (
-                myOrders.map((ord, idx) => {
-                  const items = Array.isArray(ord.items) ? ord.items : [];
-                  return (
-                    <div key={ord.id || idx} style={{ marginBottom: '10px', paddingBottom: '8px', borderBottom: '1px dashed #E2D7CE' }}>
-                      {items.map((it, i) => (
-                        <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '14px', color: '#4A2E1B' }}>
-                          <span>{it.name} x {it.quantity}</span>
-                          <span>{(Number(it.price) * Number(it.quantity)).toLocaleString()} บาท</span>
-                        </div>
-                      ))}
-                    </div>
-                  );
-                })
+                <>
+                  <h4 style={styles.billSectionTitle}>รายการอาหารทั้งหมดที่สั่ง</h4>
+                  <div style={styles.billList}>
+                    {billingSessionOrders.length === 0 ? (
+                      <p style={styles.emptyText}>ยังไม่มีรายการสั่งซื้อ</p>
+                    ) : (
+                      billingSessionOrders.map((ord) =>
+                        Array.isArray(ord.items)
+                          ? ord.items.map((it, i) => (
+                              <div key={`${ord.id}-${i}`} style={styles.billRow}>
+                                <span>
+                                  {it.name} × {it.quantity}
+                                </span>
+                                <span>{it.price * it.quantity} บาท</span>
+                              </div>
+                            ))
+                          : null
+                      )
+                    )}
+                  </div>
+
+                  <div style={styles.billSummaryBox}>
+                    <span>ยอดรวมสุทธิ</span>
+                    <strong style={styles.billGrandTotal}>
+                      {calculateGrandTotal(billingSessionOrders).toLocaleString('th-TH')} บาท
+                    </strong>
+                  </div>
+
+                  <p style={styles.billWarningText}>
+                    * เมื่อกดยืนยัน ระบบจะทำการปิดออเดอร์สำหรับโต๊ะนี้ทันที
+                  </p>
+                </>
               )}
             </div>
 
-            <div style={styles.grandTotalBox}>
-              <span style={{ fontSize: '15px', color: '#4A2E1B', fontWeight: '600' }}>ราคารวมสุทธิ</span>
-              <span style={{ fontSize: '22px', fontWeight: '900', color: '#4A2E1B' }}>
-                {calculateGrandTotal().toLocaleString()} บาท
-              </span>
-            </div>
-
-            <p style={{ fontSize: '12px', color: '#7A5C45', margin: '12px 0', textAlign: 'center' }}>
-              หากยืนยันแล้ว ระบบจะปิดการสั่งอาหารของโต๊ะนี้ทันที
-            </p>
-
-            <div style={{ display: 'flex', gap: '10px' }}>
-              <button onClick={() => setIsBillingOpen(false)} style={styles.cancelBtn}>
+            <div style={styles.modalActions}>
+              <button
+                onClick={() => setShowBillModal(false)}
+                disabled={closingBill}
+                style={styles.cancelBtn}
+              >
                 ยกเลิก
               </button>
               <button
-                onClick={handleConfirmCheckout}
-                disabled={closingSession}
+                onClick={handleConfirmBill}
+                disabled={closingBill}
                 style={{
-                  ...styles.confirmCheckoutBtn,
-                  opacity: closingSession ? 0.6 : 1,
+                  ...styles.confirmBillBtn,
+                  opacity: closingBill ? 0.6 : 1,
                 }}
               >
-                {closingSession ? 'กำลังปิดโต๊ะ...' : 'ยืนยันเรียกเก็บเงิน'}
+                {closingBill ? 'กำลังดำเนินการ...' : 'ยืนยันเรียกเก็บเงิน'}
               </button>
             </div>
           </div>
@@ -617,13 +637,98 @@ export default function OrderPage({ params }) {
   );
 }
 
+// Inline Styles
 const styles = {
   container: {
     minHeight: '100vh',
     backgroundColor: '#FAF8F5',
     color: '#4A2E1B',
-    paddingBottom: '100px',
     fontFamily: 'system-ui, -apple-system, sans-serif',
+    paddingBottom: '100px',
+  },
+  centerContainer: {
+    minHeight: '100vh',
+    backgroundColor: '#FAF8F5',
+    display: 'flex',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: '20px',
+    color: '#4A2E1B',
+  },
+  loadingText: {
+    fontSize: '18px',
+    fontWeight: '700',
+    color: '#7A5C45',
+    textAlign: 'center',
+  },
+  closedCard: {
+    backgroundColor: '#FFFFFF',
+    border: '2px solid #F9B2D7',
+    borderRadius: '24px',
+    padding: '36px 24px',
+    textAlign: 'center',
+    maxWidth: '380px',
+    boxShadow: '0 10px 30px rgba(0,0,0,0.05)',
+  },
+  closedIcon: {
+    fontSize: '54px',
+    marginBottom: '16px',
+  },
+  closedTitle: {
+    fontSize: '22px',
+    fontWeight: '900',
+    color: '#4A2E1B',
+    margin: '0 0 10px 0',
+  },
+  closedSub: {
+    fontSize: '14px',
+    color: '#7A5C45',
+    margin: 0,
+    lineHeight: '1.5',
+  },
+  thankYouCard: {
+    backgroundColor: '#FFFFFF',
+    border: '3px solid #DAF9DE',
+    borderRadius: '24px',
+    padding: '36px 24px',
+    textAlign: 'center',
+    maxWidth: '400px',
+    boxShadow: '0 10px 30px rgba(0,0,0,0.05)',
+  },
+  thankYouIcon: {
+    fontSize: '60px',
+    marginBottom: '12px',
+  },
+  thankYouTitle: {
+    fontSize: '26px',
+    fontWeight: '900',
+    color: '#4A2E1B',
+    margin: '0 0 6px 0',
+  },
+  thankYouSub: {
+    fontSize: '14px',
+    color: '#7A5C45',
+    margin: '0 0 20px 0',
+  },
+  finalBillBox: {
+    backgroundColor: '#F6FFDC',
+    padding: '16px',
+    borderRadius: '16px',
+    border: '1px solid #DAF9DE',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '6px',
+    marginBottom: '16px',
+  },
+  finalTotalText: {
+    fontSize: '28px',
+    fontWeight: '900',
+    color: '#27AE60',
+  },
+  closedNotice: {
+    fontSize: '12px',
+    color: '#C0392B',
+    margin: 0,
   },
   header: {
     backgroundColor: '#FFFFFF',
@@ -634,29 +739,31 @@ const styles = {
     borderBottom: '2px solid #CFECF3',
     position: 'sticky',
     top: 0,
-    zIndex: 100,
+    zIndex: 10,
+  },
+  brandTitle: {
+    fontSize: '12px',
+    color: '#7A5C45',
+    fontWeight: '700',
+    display: 'block',
   },
   tableBadge: {
-    backgroundColor: '#CFECF3',
+    fontSize: '22px',
+    fontWeight: '900',
     color: '#4A2E1B',
-    padding: '4px 10px',
-    borderRadius: '12px',
-    fontSize: '12px',
-    fontWeight: '700',
+    margin: 0,
   },
-  headerTitle: {
-    fontSize: '18px',
-    fontWeight: '800',
-    color: '#4A2E1B',
-    margin: '4px 0 0 0',
+  headerBtns: {
+    display: 'flex',
+    gap: '8px',
   },
   myOrdersBtn: {
-    backgroundColor: '#F6FFDC',
+    backgroundColor: '#CFECF3',
     color: '#4A2E1B',
-    border: '1px solid #DAF9DE',
+    border: 'none',
     padding: '8px 12px',
-    borderRadius: '10px',
-    fontSize: '12px',
+    borderRadius: '12px',
+    fontSize: '13px',
     fontWeight: '700',
     cursor: 'pointer',
   },
@@ -665,35 +772,56 @@ const styles = {
     color: '#4A2E1B',
     border: 'none',
     padding: '8px 12px',
-    borderRadius: '10px',
-    fontSize: '12px',
+    borderRadius: '12px',
+    fontSize: '13px',
     fontWeight: '700',
     cursor: 'pointer',
   },
-
-  // Tabs
-  tabContainer: {
-    display: 'flex',
-    gap: '8px',
-    padding: '16px 20px',
-    overflowX: 'auto',
-    backgroundColor: '#FAF8F5',
-  },
-  tabButton: {
-    padding: '8px 16px',
-    borderRadius: '20px',
+  successBanner: {
+    backgroundColor: '#DAF9DE',
+    color: '#27AE60',
+    padding: '12px 20px',
+    textAlign: 'center',
+    fontWeight: '800',
     fontSize: '14px',
+    borderBottom: '1px solid #B8E994',
+  },
+  categoryNav: {
+    display: 'flex',
+    overflowX: 'auto',
+    padding: '12px 16px',
+    gap: '8px',
+    backgroundColor: '#FFFFFF',
+    borderBottom: '1px solid #E2D7CE',
+  },
+  categoryTab: {
+    padding: '10px 18px',
+    borderRadius: '20px',
+    border: 'none',
+    backgroundColor: '#F5F3EF',
+    color: '#7A5C45',
+    fontSize: '14px',
+    fontWeight: '700',
     whiteSpace: 'nowrap',
     cursor: 'pointer',
-    transition: 'all 0.2s',
   },
-
-  // Menu Grid
+  categoryTabActive: {
+    backgroundColor: '#4A2E1B',
+    color: '#FFFFFF',
+  },
+  menuContainer: {
+    padding: '16px',
+  },
+  emptyText: {
+    textAlign: 'center',
+    color: '#7A5C45',
+    fontSize: '14px',
+    padding: '20px 0',
+  },
   menuGrid: {
     display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))',
+    gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))',
     gap: '12px',
-    padding: '0 20px',
   },
   menuCard: {
     backgroundColor: '#FFFFFF',
@@ -703,90 +831,130 @@ const styles = {
     display: 'flex',
     flexDirection: 'column',
     justifyContent: 'space-between',
-    boxShadow: '0 4px 10px rgba(74, 46, 27, 0.03)',
+    boxShadow: '0 4px 12px rgba(0,0,0,0.03)',
   },
-  itemName: {
+  menuInfo: {
+    marginBottom: '12px',
+  },
+  menuName: {
     fontSize: '15px',
-    fontWeight: '700',
-    color: '#4A2E1B',
-    margin: '0 0 6px 0',
-  },
-  itemPrice: {
-    fontSize: '14px',
     fontWeight: '800',
-    color: '#7A5C45',
-    margin: '0 0 12px 0',
+    color: '#4A2E1B',
+    margin: '0 0 4px 0',
   },
-  qtyControls: {
+  menuPrice: {
+    fontSize: '14px',
+    fontWeight: '700',
+    color: '#C0392B',
+    margin: 0,
+  },
+  quantityControls: {
     display: 'flex',
     alignItems: 'center',
     gap: '8px',
   },
-  qtyBtn: {
+  addCartBtn: {
+    width: '100%',
+    backgroundColor: '#F6FFDC',
+    color: '#4A2E1B',
+    border: '1.5px solid #DAF9DE',
+    padding: '8px',
+    borderRadius: '10px',
+    fontSize: '13px',
+    fontWeight: '800',
+    cursor: 'pointer',
+  },
+  qtyBtnMinus: {
+    backgroundColor: '#E2D7CE',
+    color: '#4A2E1B',
+    border: 'none',
     width: '28px',
     height: '28px',
     borderRadius: '8px',
-    border: 'none',
-    backgroundColor: '#DAF9DE',
-    color: '#4A2E1B',
-    fontWeight: '800',
     fontSize: '16px',
+    fontWeight: '800',
     cursor: 'pointer',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
+  },
+  qtyBtnPlus: {
+    backgroundColor: '#F9B2D7',
+    color: '#4A2E1B',
+    border: 'none',
+    width: '28px',
+    height: '28px',
+    borderRadius: '8px',
+    fontSize: '16px',
+    fontWeight: '800',
+    cursor: 'pointer',
   },
   qtyText: {
     fontSize: '14px',
     fontWeight: '800',
-    color: '#4A2E1B',
     minWidth: '16px',
     textAlign: 'center',
   },
-
-  // Floating Cart Bar
   floatingCartBar: {
     position: 'fixed',
     bottom: '20px',
-    left: '20px',
-    right: '20px',
-    maxWidth: '440px',
-    margin: '0 auto',
-    zIndex: 200,
-  },
-  cartBarContent: {
+    left: '16px',
+    right: '16px',
     backgroundColor: '#4A2E1B',
     color: '#FFFFFF',
-    borderRadius: '18px',
-    padding: '14px 20px',
+    borderRadius: '20px',
+    padding: '12px 18px',
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
     boxShadow: '0 10px 25px rgba(74, 46, 27, 0.3)',
-    cursor: 'pointer',
+    zIndex: 90,
+  },
+  cartBarInfo: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '12px',
   },
   cartBadge: {
     backgroundColor: '#F9B2D7',
     color: '#4A2E1B',
-    padding: '2px 8px',
-    borderRadius: '10px',
-    fontWeight: '800',
-    fontSize: '13px',
+    borderRadius: '50%',
+    width: '30px',
+    height: '30px',
+    display: 'flex',
+    justifyContent: 'center',
+    alignItems: 'center',
+    fontWeight: '900',
+    fontSize: '14px',
   },
-
-  // Modal / Overlay
+  cartTotalLabel: {
+    margin: 0,
+    fontSize: '11px',
+    color: '#CFECF3',
+  },
+  cartTotalPrice: {
+    fontSize: '16px',
+    fontWeight: '800',
+  },
+  viewCartBtn: {
+    backgroundColor: '#DAF9DE',
+    color: '#4A2E1B',
+    border: 'none',
+    padding: '10px 16px',
+    borderRadius: '12px',
+    fontSize: '14px',
+    fontWeight: '800',
+    cursor: 'pointer',
+  },
   modalOverlay: {
     position: 'fixed',
     top: 0,
     left: 0,
     right: 0,
     bottom: 0,
-    backgroundColor: 'rgba(74, 46, 27, 0.4)',
+    backgroundColor: 'rgba(74, 46, 27, 0.5)',
     backdropFilter: 'blur(3px)',
     display: 'flex',
     justifyContent: 'center',
     alignItems: 'flex-end',
-    zIndex: 1000,
+    zIndex: 100,
   },
   modalCard: {
     backgroundColor: '#FFFFFF',
@@ -795,7 +963,10 @@ const styles = {
     padding: '24px',
     width: '100%',
     maxWidth: '480px',
-    boxShadow: '0 -10px 30px rgba(0,0,0,0.15)',
+    maxHeight: '85vh',
+    display: 'flex',
+    flexDirection: 'column',
+    boxShadow: '0 -10px 30px rgba(0,0,0,0.2)',
   },
   modalHeader: {
     display: 'flex',
@@ -805,164 +976,191 @@ const styles = {
   },
   modalTitle: {
     fontSize: '18px',
-    fontWeight: '800',
-    color: '#4A2E1B',
+    fontWeight: '900',
     margin: 0,
   },
-  closeIconBtn: {
-    backgroundColor: '#F3F4F6',
+  closeBtn: {
+    backgroundColor: '#F5F3EF',
     border: 'none',
     width: '32px',
     height: '32px',
     borderRadius: '50%',
     fontSize: '16px',
-    color: '#4A2E1B',
     cursor: 'pointer',
+  },
+  modalBody: {
+    overflowY: 'auto',
+    flexGrow: 1,
+    marginBottom: '16px',
+  },
+  cartList: {
+    overflowY: 'auto',
+    maxHeight: '260px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '12px',
+    marginBottom: '16px',
   },
   cartItemRow: {
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: '10px 0',
-    borderBottom: '1px solid #FAF8F5',
+    borderBottom: '1px dashed #E2D7CE',
+    paddingBottom: '10px',
   },
-  summaryBox: {
-    backgroundColor: '#FFFDF9',
-    padding: '12px 16px',
-    borderRadius: '12px',
-    border: '1px solid #E2D7CE',
+  cartItemName: {
+    margin: '0 0 2px 0',
     fontSize: '14px',
-    color: '#4A2E1B',
-    marginBottom: '16px',
+    fontWeight: '800',
+  },
+  cartItemSubPrice: {
+    fontSize: '12px',
+    color: '#7A5C45',
+  },
+  cartFooter: {
+    borderTop: '2px solid #E2D7CE',
+    paddingTop: '16px',
+  },
+  cartFooterTotal: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    fontSize: '18px',
+    fontWeight: '900',
+    marginBottom: '14px',
   },
   submitOrderBtn: {
+    width: '100%',
     backgroundColor: '#F9B2D7',
     color: '#4A2E1B',
     border: 'none',
     padding: '14px',
     borderRadius: '14px',
     fontSize: '16px',
-    fontWeight: '800',
-    width: '100%',
+    fontWeight: '900',
     cursor: 'pointer',
   },
-
-  // My Orders List
   myOrderCard: {
     backgroundColor: '#FFFDF9',
     border: '1px solid #E2D7CE',
     borderRadius: '14px',
-    padding: '12px 14px',
+    padding: '12px',
     marginBottom: '10px',
   },
   myOrderHeader: {
     display: 'flex',
     justifyContent: 'space-between',
-    alignItems: 'center',
+    fontSize: '13px',
+    fontWeight: '800',
+    marginBottom: '8px',
+    borderBottom: '1px solid #E2D7CE',
+    paddingBottom: '6px',
   },
-  statusBadge: {
-    padding: '3px 8px',
+  myOrderItemList: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '4px',
+  },
+  myOrderItemRow: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    fontSize: '13px',
+    color: '#4A2E1B',
+  },
+  badgeReceived: {
+    backgroundColor: '#CFECF3',
+    color: '#4A2E1B',
+    padding: '2px 8px',
     borderRadius: '8px',
     fontSize: '11px',
-    fontWeight: '700',
+    fontWeight: '800',
   },
-  orderDetailRow: {
+  badgePreparing: {
+    backgroundColor: '#FFE8A3',
+    color: '#D35400',
+    padding: '2px 8px',
+    borderRadius: '8px',
+    fontSize: '11px',
+    fontWeight: '800',
+  },
+  badgeServed: {
+    backgroundColor: '#DAF9DE',
+    color: '#27AE60',
+    padding: '2px 8px',
+    borderRadius: '8px',
+    fontSize: '11px',
+    fontWeight: '800',
+  },
+  badgeDefault: {
+    backgroundColor: '#E2D7CE',
+    padding: '2px 8px',
+    borderRadius: '8px',
+    fontSize: '11px',
+  },
+  billSectionTitle: {
+    fontSize: '14px',
+    fontWeight: '800',
+    margin: '0 0 10px 0',
+  },
+  billList: {
+    maxHeight: '180px',
+    overflowY: 'auto',
+    border: '1px solid #E2D7CE',
+    borderRadius: '12px',
+    padding: '10px 14px',
+    marginBottom: '14px',
+    backgroundColor: '#FFFDF9',
+  },
+  billRow: {
     display: 'flex',
     justifyContent: 'space-between',
     fontSize: '13px',
-    color: '#4A2E1B',
-    marginTop: '4px',
+    padding: '4px 0',
+    borderBottom: '1px dashed #E2D7CE',
   },
-  orderFooter: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    fontSize: '13px',
-    borderTop: '1px dashed #E2D7CE',
-    marginTop: '8px',
-    paddingTop: '6px',
-    color: '#4A2E1B',
-  },
-
-  // Billing
-  grandTotalBox: {
-    backgroundColor: '#F6FFDC',
-    border: '2px solid #DAF9DE',
-    padding: '16px',
-    borderRadius: '14px',
+  billSummaryBox: {
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
+    backgroundColor: '#F6FFDC',
+    padding: '12px 16px',
+    borderRadius: '12px',
+    border: '1px solid #DAF9DE',
+    marginBottom: '10px',
+  },
+  billGrandTotal: {
+    fontSize: '20px',
+    fontWeight: '900',
+    color: '#27AE60',
+  },
+  billWarningText: {
+    fontSize: '12px',
+    color: '#7A5C45',
+    margin: '0 0 16px 0',
+  },
+  modalActions: {
+    display: 'flex',
+    gap: '10px',
   },
   cancelBtn: {
     flex: 1,
-    backgroundColor: '#F3F4F6',
+    backgroundColor: '#F5F3EF',
     color: '#4A2E1B',
     border: 'none',
     padding: '12px',
     borderRadius: '12px',
-    fontWeight: '700',
-    cursor: 'pointer',
-  },
-  confirmCheckoutBtn: {
-    flex: 1,
-    backgroundColor: '#F9B2D7',
-    color: '#4A2E1B',
-    border: 'none',
-    padding: '12px',
-    borderRadius: '12px',
-    fontWeight: '800',
-    cursor: 'pointer',
-  },
-
-  // Toast
-  toast: {
-    position: 'fixed',
-    top: '20px',
-    left: '50%',
-    transform: 'translateX(-50%)',
-    backgroundColor: '#4A2E1B',
-    color: '#FFFFFF',
-    padding: '10px 20px',
-    borderRadius: '20px',
     fontSize: '14px',
     fontWeight: '700',
-    zIndex: 2000,
-    boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+    cursor: 'pointer',
   },
-
-  // Full Screen States
-  fullScreenContainer: {
-    minHeight: '100vh',
-    backgroundColor: '#FAF8F5',
-    display: 'flex',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: '20px',
-    fontFamily: 'system-ui, -apple-system, sans-serif',
-  },
-  fullScreenCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: '24px',
-    padding: '36px 28px',
-    width: '100%',
-    maxWidth: '400px',
-    textAlign: 'center',
-    boxShadow: '0 10px 30px rgba(74, 46, 27, 0.08)',
-    border: '2px solid #CFECF3',
-  },
-  billBox: {
-    backgroundColor: '#F6FFDC',
-    border: '2px solid #DAF9DE',
-    borderRadius: '16px',
-    padding: '16px',
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '6px',
-    marginTop: '12px',
-  },
-  billPriceText: {
-    fontSize: '32px',
-    fontWeight: '900',
-    color: '#4A2E1B',
+  confirmBillBtn: {
+    flex: 1,
+    backgroundColor: '#C0392B',
+    color: '#FFFFFF',
+    border: 'none',
+    padding: '12px',
+    borderRadius: '12px',
+    fontSize: '14px',
+    fontWeight: '700',
+    cursor: 'pointer',
   },
 };
